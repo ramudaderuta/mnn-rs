@@ -310,10 +310,14 @@ pub fn mnn_c_build(path: impl AsRef<Path>, vendor: impl AsRef<Path>) -> Result<(
             }
             #[cfg(feature = "crt_static")]
             config.static_crt(true);
+            #[cfg(not(feature = "crt_static"))]
+            config.static_crt(false);
             config
         })
         .cpp(true)
-        .static_flag(true)
+        // Build mnn_c against the dynamic MSVC runtime to stay consistent with
+        // the CMake-built MNN library (avoids MT/MD mismatch at link).
+        .static_flag(false)
         .files(files)
         .std("c++14")
         // .pipe(|build| {
@@ -336,6 +340,10 @@ pub fn build_cmake(path: impl AsRef<Path>, install: impl AsRef<Path>) -> Result<
     let threads = std::thread::available_parallelism()?;
     cmake::Config::new(path)
         .define("CMAKE_CXX_STANDARD", "14")
+        // Build the native library in Release even when Rust is in debug to avoid
+        // pulling MSVC debug CRT artifacts (msvcrtd.lib) that aren't present in
+        // the xwin/LLVM toolchain layout.
+        .profile("Release")
         .parallel(threads.get() as u8)
         .define("MNN_BUILD_SHARED_LIBS", "OFF")
         .define("MNN_SEP_BUILD", "OFF")
@@ -343,6 +351,21 @@ pub fn build_cmake(path: impl AsRef<Path>, install: impl AsRef<Path>) -> Result<
         .define("MNN_USE_SYSTEM_LIB", "OFF")
         .define("MNN_BUILD_CONVERTER", "OFF")
         .define("MNN_BUILD_TOOLS", "OFF")
+        // Avoid x86-specific SIMD toggles that require compile-time CPU features
+        // (clang-cl on Windows was failing for ssse3/sse4.1/avx2 intrinsics).
+        .define("MNN_USE_SSE", "OFF")
+        .define("MNN_AVX2", "OFF")
+        .define("MNN_AVX512", "OFF")
+        // Keep CRT selection consistent between the CMake-built core and the cc-built mnn_c shim
+        // to avoid MT/MD runtime mismatches when the `crt_static` feature is toggled.
+        .define(
+            "CMAKE_MSVC_RUNTIME_LIBRARY",
+            if CxxOption::CRT_STATIC.enabled() {
+                "MultiThreaded"
+            } else {
+                "MultiThreadedDLL"
+            },
+        )
         .define("CMAKE_INSTALL_PREFIX", install.as_ref())
         // https://github.com/rust-lang/rust/issues/39016
         // https://github.com/rust-lang/cc-rs/pull/717
@@ -485,7 +508,7 @@ impl CxxOption {
     pub const OPENCL: CxxOption = cxx_option_from_feature!("opencl", "MNN_OPENCL");
     pub const OPENMP: CxxOption = cxx_option_from_feature!("openmp", "MNN_OPENMP");
     pub const OPENGL: CxxOption = cxx_option_from_feature!("opengl", "MNN_OPENGL");
-    pub const CRT_STATIC: CxxOption = cxx_option_from_feature!("opengl", "MNN_WIN_RUNTIME_MT");
+    pub const CRT_STATIC: CxxOption = cxx_option_from_feature!("crt_static", "MNN_WIN_RUNTIME_MT");
     pub const THREADPOOL: CxxOption =
         cxx_option_from_feature!("mnn-threadpool", "MNN_USE_THREAD_POOL");
 
