@@ -365,6 +365,10 @@ pub fn build_cmake(path: impl AsRef<Path>, install: impl AsRef<Path>) -> Result<
         .define("MNN_SEP_BUILD", "OFF")
         .define("MNN_PORTABLE_BUILD", "ON")
         .define("MNN_USE_SYSTEM_LIB", "OFF")
+        .define("MNN_BUILD_LLM", "ON")
+        .define("MNN_SUPPORT_TRANSFORMER_FUSE", "ON")
+        .define("MNN_LOW_MEMORY", "ON")
+        .define("MNN_CPU_WEIGHT_DEQUANT_GEMM", "ON")
         .define("MNN_BUILD_CONVERTER", "OFF")
         .define("MNN_BUILD_TOOLS", "OFF")
         // Avoid x86-specific SIMD toggles that require compile-time CPU features
