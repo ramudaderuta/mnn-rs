@@ -1,0 +1,211 @@
+--- a/transformers/llm/engine/src/embedding.cpp
++++ b/transformers/llm/engine/src/embedding.cpp
+@@ -2,7 +2,7 @@
+ //  embedding.cpp
+ //
+ //  Created by MNN on 2025/04/08.
+-//  Copyright © 2018, Alibaba Group Holding Limited
++//  Copyright (c) 2018, Alibaba Group Holding Limited
+ //
+ 
+ #include "llm/llm.hpp"
+@@ -11,6 +11,10 @@
+ #include "tokenizer.hpp"
+ #include "diskembedding.hpp"
+ 
++#include <algorithm>
++#include <cstdlib>
++#include <cstdio>
++
+ namespace MNN {
+ using namespace Express;
+ namespace Transformer {
+@@ -51,6 +55,9 @@
+         return true;
+     }
+ 
++    if (mConfig->precision() != "high" || mConfig->memory() != "high") {
++        set_config("{\"precision\":\"high\",\"memory\":\"high\"}");
++    }
+     initRuntime();
+     printf("load tokenizer\n");
+     std::cout << mConfig->tokenizer_file() << std::endl;
+@@ -69,8 +76,9 @@
+     module_config.rearrange    = true;
+     auto model_path            = mConfig->llm_model();
+     MNN_PRINT("load %s ... ", model_path.c_str());
+-    mModule.reset(Module::load({"input_ids", "attention_mask", "position_ids"}, {"sentence_embeddings"},
+-                                   model_path.c_str(), mRuntimeManager, &module_config));
++    mRuntimeManager->setExternalFile(mConfig->llm_weight());
++    std::vector<std::string> empty;
++    mModule.reset(Module::load(empty, empty, model_path.c_str(), mRuntimeManager, &module_config));
+     if (nullptr == mModule.get()) {
+         return false;
+     }
+@@ -84,10 +92,149 @@
+ 
+ VARP Embedding::ids_embedding(const std::vector<int>& ids) {
+     int prompt_len           = ids.size();
+-    auto inputs_ids          = embedding(ids);
+-    auto attention_mask      = gen_attention_mask(prompt_len);
+-    auto position_ids        = gen_position_ids(prompt_len);
+-    return forwardRaw(inputs_ids, attention_mask, position_ids)[0];
++    int mask_len             = prompt_len;
++    bool use_raw_ids = false;
++    auto module_info = mModule ? mModule->getInfo() : nullptr;
++    if (module_info && !module_info->inputs.empty()) {
++        auto int_type = halide_type_of<int>();
++        const auto& input_type = module_info->inputs[0].type;
++        if (input_type.code == int_type.code && input_type.bits == int_type.bits) {
++            use_raw_ids = true;
++        }
++    }
++    auto inputs_ids = VARP(nullptr);
++    auto token_embeds = VARP(nullptr);
++    bool pooled_single = false;
++    if (!use_raw_ids && module_info && !module_info->inputs.empty()) {
++        const auto& dims = module_info->inputs[0].dim;
++        if (dims.size() == 3 && dims[0] == 1 && dims[1] == 1 && dims[2] == mConfig->hidden_size()) {
++            token_embeds = embedding(ids);
++            auto info = token_embeds->getInfo();
++            auto data = token_embeds->readMap<float>();
++            if (info && data && info->size >= static_cast<size_t>(mConfig->hidden_size())) {
++                inputs_ids = _Input({1, 1, mConfig->hidden_size()}, NCHW, halide_type_of<float>());
++                auto out = inputs_ids->writeMap<float>();
++                const int hidden = mConfig->hidden_size();
++                for (int h = 0; h < hidden; ++h) {
++                    float sum = 0.0f;
++                    for (int t = 0; t < prompt_len; ++t) {
++                        sum += data[t * hidden + h];
++                    }
++                    out[h] = sum / std::max(1, prompt_len);
++                }
++                pooled_single = true;
++                mask_len = 1;
++            }
++        }
++    }
++    if (inputs_ids == nullptr && use_raw_ids) {
++        std::vector<int> dims;
++        if (module_info && !module_info->inputs.empty()) {
++            dims = module_info->inputs[0].dim;
++        }
++        if (dims.empty()) {
++            dims = {1, prompt_len};
++        }
++        for (auto& d : dims) {
++            if (d <= 0) {
++                d = prompt_len;
++            }
++        }
++        inputs_ids = _Input(dims, NCHW, halide_type_of<int>());
++        auto ptr = inputs_ids->writeMap<int>();
++        for (int i = 0; i < prompt_len; ++i) {
++            ptr[i] = ids[i];
++        }
++    } else if (inputs_ids == nullptr) {
++        token_embeds = embedding(ids);
++        inputs_ids = token_embeds;
++    }
++    VARP attention_mask = nullptr;
++    VARP position_ids = nullptr;
++    if (module_info) {
++        auto find_input = [&](const std::string& name) -> int {
++            for (size_t i = 0; i < module_info->inputNames.size(); ++i) {
++                if (module_info->inputNames[i] == name) {
++                    return static_cast<int>(i);
++                }
++            }
++            return -1;
++        };
++        int mask_idx = find_input("attention_mask");
++        if (mask_idx >= 0 && mask_idx < static_cast<int>(module_info->inputs.size())) {
++            const auto& mask_info = module_info->inputs[mask_idx];
++            if (mask_info.dim.size() == 2) {
++                int mask_type = mask_info.type.code;
++                auto dims = mask_info.dim;
++                for (auto& d : dims) {
++                    if (d <= 0) {
++                        d = mask_len;
++                    }
++                }
++                if (mask_type == halide_type_of<int>().code) {
++                    attention_mask = _Input(dims, NCHW, halide_type_of<int>());
++                    auto ptr = attention_mask->writeMap<int>();
++                    for (int i = 0; i < mask_len; ++i) {
++                        ptr[i] = 1;
++                    }
++                } else {
++                    attention_mask = _Input(dims, NCHW, halide_type_of<float>());
++                    auto ptr = attention_mask->writeMap<float>();
++                    for (int i = 0; i < mask_len; ++i) {
++                        ptr[i] = 1.0f;
++                    }
++                }
++            }
++        }
++        int pos_idx = find_input("position_ids");
++        if (pos_idx >= 0 && pos_idx < static_cast<int>(module_info->inputs.size())) {
++            const auto& pos_info = module_info->inputs[pos_idx];
++            if (pos_info.dim.size() == 2) {
++                auto dims = pos_info.dim;
++                for (auto& d : dims) {
++                    if (d <= 0) {
++                        d = mask_len;
++                    }
++                }
++                position_ids = _Input(dims, NCHW, halide_type_of<int>());
++                auto ptr = position_ids->writeMap<int>();
++                for (int i = 0; i < mask_len; ++i) {
++                    ptr[i] = i;
++                }
++            }
++        }
++    }
++    if (attention_mask == nullptr) {
++        attention_mask = gen_attention_mask(mask_len);
++    }
++    if (position_ids == nullptr) {
++        position_ids = gen_position_ids(mask_len);
++    }
++    VARP output = nullptr;
++    if (module_info && !module_info->inputNames.empty()) {
++        std::vector<VARP> inputs;
++        inputs.reserve(module_info->inputNames.size());
++        bool has_unknown = false;
++        for (const auto& name : module_info->inputNames) {
++            if (name == "input_ids") {
++                inputs.push_back(inputs_ids);
++            } else if (name == "attention_mask") {
++                inputs.push_back(attention_mask);
++            } else if (name == "position_ids") {
++                inputs.push_back(position_ids);
++            } else {
++                has_unknown = true;
++                break;
++            }
++        }
++        if (!has_unknown && !inputs.empty()) {
++            output = mModule->onForward(inputs)[0];
++        }
++    }
++    if (output == nullptr) {
++        output = forwardRaw(inputs_ids, attention_mask, position_ids)[0];
++    }
++    return output;
+ }
+ 
+ VARP Embedding::txt_embedding(const std::string& txt) {
+@@ -99,6 +246,12 @@
+     auto attention_mask = _Input({1, 1, seq_len, seq_len}, NCHW, halide_type_of<float>());
+     auto ptr = attention_mask->writeMap<float>();
+     if (mConfig->attention_mask() == "float") {
++        if (mConfig->attention_type() == "full") {
++            for (int i = 0; i < seq_len * seq_len; i++) {
++                ptr[i] = 1.0f;
++            }
++            return attention_mask;
++        }
+         for (int i = 0; i < seq_len; i++) {
+             for (int j = 0; j < seq_len; j++) {
+                 ptr[seq_len * i + j] = (j > i) * std::numeric_limits<float>::lowest();

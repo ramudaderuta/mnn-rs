@@ -80,6 +80,10 @@ fn ensure_vendor_exists(vendor: impl AsRef<Path>) -> Result<()> {
 
 fn main() -> Result<()> {
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=vendor/transformers/llm/engine/src/embedding.cpp");
+    println!("cargo:rerun-if-changed=vendor/transformers/llm/engine/include/llm/llm.hpp");
+    println!("cargo:rerun-if-changed=patches/embedding-high-precision.patch");
+    println!("cargo:rerun-if-changed=patches/diskembedding-oc-calc.patch");
     println!("cargo:rerun-if-env-changed=MNN_SRC");
     let out_dir = PathBuf::from(std::env::var("OUT_DIR")?);
     let source = PathBuf::from(
@@ -130,6 +134,18 @@ fn main() -> Result<()> {
         std::fs::set_permissions(&mnn_define, std::fs::Permissions::from_mode(0o644))?;
         std::fs::write(mnn_define, patched)?;
     }
+
+    let patches_dir = PathBuf::from(MANIFEST_DIR).join("patches");
+    apply_patch_if_missing(
+        patches_dir.join("embedding-high-precision.patch"),
+        vendor.join("transformers/llm/engine/src/embedding.cpp"),
+        "set_config(\"{\\\"precision\\\":\\\"high\\\",\\\"memory\\\":\\\"high\\\"}\")",
+    )?;
+    apply_patch_if_missing(
+        patches_dir.join("diskembedding-oc-calc.patch"),
+        vendor.join("transformers/llm/engine/src/diskembedding.cpp"),
+        "size_t token_size = 0;",
+    )?;
 
     if *MNN_COMPILE {
         let install_dir = out_dir.join("mnn-install");
@@ -412,6 +428,26 @@ pub fn build_cmake(path: impl AsRef<Path>, install: impl AsRef<Path>) -> Result<
 
 pub fn rerun_if_changed(path: impl AsRef<Path>) {
     println!("cargo:rerun-if-changed={}", path.as_ref().display());
+}
+
+pub fn apply_patch_if_missing(
+    patch: impl AsRef<Path>,
+    file: impl AsRef<Path>,
+    marker: &str,
+) -> Result<()> {
+    let patch = std::fs::canonicalize(patch)?;
+    rerun_if_changed(&patch);
+    let file_path = file.as_ref();
+    let file_contents = std::fs::read_to_string(file_path).context("Failed to read input file")?;
+    if file_contents.contains(marker) {
+        return Ok(());
+    }
+    let patch_text = std::fs::read_to_string(&patch)?;
+    let patch = diffy::Patch::from_str(&patch_text)?;
+    let patched_file =
+        diffy::apply(&file_contents, &patch).context("Failed to apply patches using diffy")?;
+    std::fs::write(file_path, patched_file)?;
+    Ok(())
 }
 
 // pub fn vulkan_includes(vendor: impl AsRef<Path>) -> Vec<PathBuf> {
