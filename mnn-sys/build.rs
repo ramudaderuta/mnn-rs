@@ -269,7 +269,7 @@ pub fn mnn_c_bindgen(vendor: impl AsRef<Path>, out: impl AsRef<Path>) -> Result<
 
 pub fn mnn_cpp_bindgen(vendor: impl AsRef<Path>, out: impl AsRef<Path>) -> Result<()> {
     let vendor = vendor.as_ref();
-    let bindings = bindgen::Builder::default()
+    let mut bindings = bindgen::Builder::default()
         .clang_args(["-x", "c++"])
         .clang_args(["-std=c++14"])
         .clang_arg(CxxOption::VULKAN.cxx())
@@ -281,6 +281,7 @@ pub fn mnn_cpp_bindgen(vendor: impl AsRef<Path>, out: impl AsRef<Path>) -> Resul
         .generate_inline_functions(true)
         .size_t_is_usize(true)
         .emit_diagnostics()
+        .detect_include_paths(std::env::var("TARGET") == std::env::var("HOST"))
         .ctypes_prefix("core::ffi")
         .header(
             vendor
@@ -290,8 +291,16 @@ pub fn mnn_cpp_bindgen(vendor: impl AsRef<Path>, out: impl AsRef<Path>) -> Resul
                 .to_string_lossy(),
         )
         .allowlist_item(".*SessionInfoCode.*");
-    // let cmd = bindings.command_line_flags().join(" ");
-    // println!("cargo:warn=bindgen: {}", cmd);
+    
+    // On Windows, help clang find MSVC's C++ standard library
+    if *TARGET_OS == "windows" {
+        bindings = bindings
+            .clang_arg("--target=x86_64-pc-windows-msvc")
+            .clang_arg("-fms-compatibility")
+            .clang_arg("-fms-extensions");
+    }
+    let cmd = bindings.command_line_flags().join(" ");
+    println!("cargo:warning=bindgen_cpp_command: {}", cmd);
     let bindings = bindings.generate()?;
     bindings.write_to_file(out.as_ref().join("mnn_cpp.rs"))?;
     Ok(())
@@ -444,15 +453,29 @@ pub fn apply_patch_if_missing(
     let patch = std::fs::canonicalize(patch)?;
     rerun_if_changed(&patch);
     let file_path = file.as_ref();
-    let file_contents = std::fs::read_to_string(file_path).context("Failed to read input file")?;
+    let file_contents_raw =
+        std::fs::read_to_string(file_path).context("Failed to read input file")?;
+    let file_has_crlf = file_contents_raw.contains("\r\n");
+    let file_contents = if file_has_crlf {
+        file_contents_raw.replace("\r\n", "\n")
+    } else {
+        file_contents_raw
+    };
     if file_contents.contains(marker) {
         return Ok(());
     }
-    let patch_text = std::fs::read_to_string(&patch)?;
+    let mut patch_text = std::fs::read_to_string(&patch)?;
+    if patch_text.contains("\r\n") {
+        patch_text = patch_text.replace("\r\n", "\n");
+    }
     let patch = diffy::Patch::from_str(&patch_text)?;
     let patched_file =
         diffy::apply(&file_contents, &patch).context("Failed to apply patches using diffy")?;
-    std::fs::write(file_path, patched_file)?;
+    if file_has_crlf {
+        std::fs::write(file_path, patched_file.replace("\n", "\r\n"))?;
+    } else {
+        std::fs::write(file_path, patched_file)?;
+    }
     Ok(())
 }
 

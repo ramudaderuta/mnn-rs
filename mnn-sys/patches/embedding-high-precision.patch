@@ -1,36 +1,28 @@
 --- a/transformers/llm/engine/src/embedding.cpp
 +++ b/transformers/llm/engine/src/embedding.cpp
-@@ -2,7 +2,7 @@
- //  embedding.cpp
+@@ -5,6 +5,10 @@
+ //  Copyright © 2018, Alibaba Group Holding Limited
  //
- //  Created by MNN on 2025/04/08.
--//  Copyright © 2018, Alibaba Group Holding Limited
-+//  Copyright (c) 2018, Alibaba Group Holding Limited
- //
- 
- #include "llm/llm.hpp"
-@@ -11,6 +11,10 @@
- #include "tokenizer.hpp"
- #include "diskembedding.hpp"
  
 +#include <algorithm>
 +#include <cstdlib>
 +#include <cstdio>
 +
- namespace MNN {
- using namespace Express;
- namespace Transformer {
-@@ -51,6 +55,9 @@
+ #include "llm/llm.hpp"
+ #include "llmconfig.hpp"
+ #include "prompt.hpp"
+@@ -48,6 +52,10 @@ bool Embedding::load() {
          return true;
      }
  
 +    if (mConfig->precision() != "high" || mConfig->memory() != "high") {
 +        set_config("{\"precision\":\"high\",\"memory\":\"high\"}");
 +    }
++
      initRuntime();
      printf("load tokenizer\n");
      std::cout << mConfig->tokenizer_file() << std::endl;
-@@ -69,8 +76,9 @@
+@@ -66,8 +74,10 @@ bool Embedding::load() {
      module_config.rearrange    = true;
      auto model_path            = mConfig->llm_model();
      MNN_PRINT("load %s ... ", model_path.c_str());
@@ -39,10 +31,11 @@
 +    mRuntimeManager->setExternalFile(mConfig->llm_weight());
 +    std::vector<std::string> empty;
 +    mModule.reset(Module::load(empty, empty, model_path.c_str(), mRuntimeManager, &module_config));
++    MNN_PRINT("Done!\n");
      if (nullptr == mModule.get()) {
          return false;
      }
-@@ -84,10 +92,149 @@
+@@ -77,10 +87,149 @@ std::vector<Express::VARP> Embedding::forwardRaw(Express::VARP hiddenState, Expr
  
  VARP Embedding::ids_embedding(const std::vector<int>& ids) {
      int prompt_len           = ids.size();
@@ -196,7 +189,7 @@
  }
  
  VARP Embedding::txt_embedding(const std::string& txt) {
-@@ -99,6 +246,12 @@
+@@ -92,6 +241,12 @@ VARP Embedding::gen_attention_mask(int seq_len) {
      auto attention_mask = _Input({1, 1, seq_len, seq_len}, NCHW, halide_type_of<float>());
      auto ptr = attention_mask->writeMap<float>();
      if (mConfig->attention_mask() == "float") {
